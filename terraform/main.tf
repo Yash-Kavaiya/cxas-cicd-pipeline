@@ -28,8 +28,8 @@ terraform {
     }
   }
 
-  # Remote backend — configure per environment
-  backend "gcs" {}
+  # Local backend — for local development
+  backend "local" {}
 }
 
 # ---------------------------------------------------------------------------
