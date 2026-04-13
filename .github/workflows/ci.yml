@@ -1,0 +1,150 @@
+# =============================================================================
+# CI Workflow: Terraform Validate + CX Agent Studio Version & Export
+# =============================================================================
+# Triggers on push to main or PR. On main push:
+#   1. Validates Terraform
+#   2. Applies Terraform (infra only — APIs, buckets, SA)
+#   3. Creates a CX Agent Studio version snapshot
+#   4. Exports the agent app to GCS for audit/backup
+# =============================================================================
+
+name: "CI — CXAS Version & Export"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+
+env:
+  TF_VERSION: "1.9.0"
+  TF_WORKING_DIR: "terraform"
+
+permissions:
+  contents: read
+  id-token: write  # For Workload Identity Federation
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Terraform Validate & Plan
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    name: "Terraform Validate"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config=environments/${{ matrix.environment }}/backend.hcl
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan \
+            -var-file=environments/${{ matrix.environment }}/terraform.tfvars \
+            -no-color \
+            -out=tfplan-${{ matrix.environment }}
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Apply Terraform + Create Version + Export (main only)
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: "Dev — Apply + Version + Export"
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev
+    outputs:
+      version_name: ${{ steps.create-version.outputs.version_name }}
+      export_gcs_uri: ${{ steps.export-app.outputs.export_gcs_uri }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # --- Terraform Apply (infra only) ---
+      - name: Terraform Init & Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -backend-config=environments/dev/backend.hcl
+          terraform apply \
+            -var-file=environments/dev/terraform.tfvars \
+            -auto-approve
+
+      # --- Create Version ---
+      - name: Create CX Agent Studio Version
+        id: create-version
+        run: |
+          chmod +x scripts/cxas-create-version.sh
+          bash scripts/cxas-create-version.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }} \
+            --display-name="ci-${{ github.sha }}-$(date +%Y%m%d-%H%M%S)" \
+            --description="CI build: ${{ github.sha }} by ${{ github.actor }}"
+
+      # --- Export to GCS ---
+      - name: Export Agent Application
+        id: export-app
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          GCS_URI="gs://${{ vars.GCP_PROJECT_ID }}-cxas-exports-dev/ci/${TIMESTAMP}-${{ github.sha }}.zip"
+          chmod +x scripts/cxas-export-app.sh
+          bash scripts/cxas-export-app.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }} \
+            --gcs-uri="${GCS_URI}"
+
+      # --- List Versions for Audit ---
+      - name: List Current Versions
+        run: |
+          chmod +x scripts/cxas-list-versions.sh
+          bash scripts/cxas-list-versions.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }}

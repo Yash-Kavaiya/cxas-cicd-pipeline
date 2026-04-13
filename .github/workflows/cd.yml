@@ -1,0 +1,171 @@
+# =============================================================================
+# CD Workflow: Promote & Deploy to Staging / Production
+# =============================================================================
+# Manual dispatch workflow for promoting a CX Agent Studio application
+# across environments (dev → staging → prod).
+#
+# Workflow:
+#   1. Export agent from source environment
+#   2. Import into target environment
+#   3. Create a version snapshot in target
+#   4. Update the target deployment with the new version
+# =============================================================================
+
+name: "CD — CXAS Promote & Deploy"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Target environment to deploy to"
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      version_label:
+        description: "Version label (e.g. v1.2.3). Auto-generated if empty."
+        required: false
+        type: string
+      skip_version_create:
+        description: "Skip version creation in source (use existing export)"
+        required: false
+        type: boolean
+        default: false
+      source_gcs_uri:
+        description: "Override: GCS URI of existing export to import directly"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Promote to Staging
+  # ---------------------------------------------------------------------------
+  promote-staging:
+    name: "Promote → Staging"
+    runs-on: ubuntu-latest
+    if: inputs.target_environment == 'staging'
+    environment: staging
+    outputs:
+      version_name: ${{ steps.promote.outputs.version_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Promote Dev → Staging
+        id: promote
+        run: |
+          chmod +x scripts/cxas-promote.sh
+          VERSION="${{ inputs.version_label }}"
+          [[ -z "$VERSION" ]] && VERSION="staging-$(date +%Y%m%d-%H%M%S)"
+
+          bash scripts/cxas-promote.sh \
+            --src-project=${{ vars.DEV_PROJECT_ID }} \
+            --src-app=${{ vars.DEV_APP_ID }} \
+            --src-region=${{ vars.CXAS_REGION }} \
+            --dst-project=${{ vars.STAGING_PROJECT_ID }} \
+            --dst-app=${{ vars.STAGING_APP_ID }} \
+            --dst-region=${{ vars.CXAS_REGION }} \
+            --dst-deployment=${{ vars.STAGING_DEPLOYMENT_ID }} \
+            --bucket=${{ vars.EXPORTS_BUCKET }} \
+            --version-label="${VERSION}"
+
+      - name: Verify Staging Deployments
+        run: |
+          chmod +x scripts/cxas-list-deployments.sh
+          bash scripts/cxas-list-deployments.sh \
+            --project-id=${{ vars.STAGING_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.STAGING_APP_ID }}
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Promote to Production (requires approval)
+  # ---------------------------------------------------------------------------
+  promote-prod:
+    name: "Promote → Production"
+    runs-on: ubuntu-latest
+    if: inputs.target_environment == 'prod'
+    environment: prod  # ← GitHub environment with required reviewers
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Promote Staging → Prod
+        id: promote
+        run: |
+          chmod +x scripts/cxas-promote.sh
+          VERSION="${{ inputs.version_label }}"
+          [[ -z "$VERSION" ]] && VERSION="prod-$(date +%Y%m%d-%H%M%S)"
+
+          bash scripts/cxas-promote.sh \
+            --src-project=${{ vars.STAGING_PROJECT_ID }} \
+            --src-app=${{ vars.STAGING_APP_ID }} \
+            --src-region=${{ vars.CXAS_REGION }} \
+            --dst-project=${{ vars.PROD_PROJECT_ID }} \
+            --dst-app=${{ vars.PROD_APP_ID }} \
+            --dst-region=${{ vars.CXAS_REGION }} \
+            --dst-deployment=${{ vars.PROD_DEPLOYMENT_ID }} \
+            --bucket=${{ vars.EXPORTS_BUCKET }} \
+            --version-label="${VERSION}"
+
+      - name: Verify Prod Deployments
+        run: |
+          chmod +x scripts/cxas-list-deployments.sh
+          bash scripts/cxas-list-deployments.sh \
+            --project-id=${{ vars.PROD_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.PROD_APP_ID }}
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Rollback (reusable)
+  # ---------------------------------------------------------------------------
+  rollback:
+    name: "Rollback (manual trigger)"
+    runs-on: ubuntu-latest
+    if: false  # Enable by removing this line or via separate workflow_dispatch
+    environment: ${{ inputs.target_environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: List Versions (pick rollback target)
+        run: |
+          chmod +x scripts/cxas-list-versions.sh
+          bash scripts/cxas-list-versions.sh \
+            --project-id=${{ vars.PROD_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.PROD_APP_ID }}

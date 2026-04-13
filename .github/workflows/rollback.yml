@@ -1,0 +1,98 @@
+# =============================================================================
+# Rollback Workflow: Restore a Previous CX Agent Studio Version
+# =============================================================================
+# Emergency workflow for rolling back to a known-good version.
+# Can restore from version ID or import from a GCS backup.
+# =============================================================================
+
+name: "Rollback — CXAS Version Restore"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment to rollback"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      rollback_method:
+        description: "Rollback method"
+        required: true
+        type: choice
+        options:
+          - restore_version  # Restore to a specific version ID
+          - import_backup    # Import from a GCS backup
+      version_id:
+        description: "Version ID to restore (for restore_version method)"
+        required: false
+        type: string
+      backup_gcs_uri:
+        description: "GCS URI of backup archive (for import_backup method)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    name: "Rollback ${{ inputs.target_environment }}"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      # --- Show current state ---
+      - name: List Current Versions
+        run: |
+          chmod +x scripts/cxas-list-versions.sh
+          bash scripts/cxas-list-versions.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }}
+
+      # --- Method 1: Restore to specific version ---
+      - name: Restore Version
+        if: inputs.rollback_method == 'restore_version' && inputs.version_id != ''
+        run: |
+          chmod +x scripts/cxas-restore-version.sh
+          bash scripts/cxas-restore-version.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }} \
+            --version-id=${{ inputs.version_id }}
+
+      # --- Method 2: Import from GCS backup ---
+      - name: Import from Backup
+        if: inputs.rollback_method == 'import_backup' && inputs.backup_gcs_uri != ''
+        run: |
+          chmod +x scripts/cxas-import-app.sh
+          bash scripts/cxas-import-app.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }} \
+            --gcs-uri=${{ inputs.backup_gcs_uri }}
+
+      # --- Verify after rollback ---
+      - name: Verify Deployments Post-Rollback
+        run: |
+          chmod +x scripts/cxas-list-deployments.sh
+          bash scripts/cxas-list-deployments.sh \
+            --project-id=${{ vars.GCP_PROJECT_ID }} \
+            --region=${{ vars.CXAS_REGION }} \
+            --app-id=${{ vars.CXAS_APP_ID }}
