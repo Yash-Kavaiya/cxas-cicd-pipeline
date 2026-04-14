@@ -52,9 +52,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: |
-          terraform init \
-            -backend-config=environments/${{ matrix.environment }}/backend.hcl
+        run: terraform init -backend=false
 
       - name: Terraform Format Check
         working-directory: ${{ env.TF_WORKING_DIR }}

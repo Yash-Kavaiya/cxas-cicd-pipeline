@@ -1,2 +1,2 @@
-bucket = "my-gcp-project-prod-tf-state"
+bucket = "genaiguruyoutube-tf-state-prod"
 prefix = "cxas-cicd/prod"
