@@ -99,12 +99,12 @@ variable "service_account_email" {
 
 locals {
   # Construct full resource names
-  app_parent     = "projects/${var.project_id}/locations/${var.region}"
-  app_name       = "${local.app_parent}/apps/${var.app_id}"
-  bucket_name    = var.export_bucket_name != "" ? var.export_bucket_name : "${var.project_id}-cxas-exports-${var.environment}"
-  sa_email       = var.service_account_email != "" ? var.service_account_email : google_service_account.cxas_cicd[0].email
-  version_name   = var.version_display_name != "" ? var.version_display_name : "v-${formatdate("YYYYMMDD-hhmmss", timestamp())}"
-  ces_api_base   = "https://ces.googleapis.com/v1"
+  app_parent   = "projects/${var.project_id}/locations/${var.region}"
+  app_name     = "${local.app_parent}/apps/${var.app_id}"
+  bucket_name  = var.export_bucket_name != "" ? var.export_bucket_name : "${var.project_id}-cxas-exports-${var.environment}"
+  sa_email     = var.service_account_email != "" ? var.service_account_email : google_service_account.cxas_cicd[0].email
+  version_name = var.version_display_name != "" ? var.version_display_name : "v-${formatdate("YYYYMMDD-hhmmss", timestamp())}"
+  ces_api_base = "https://ces.googleapis.com/v1"
 
   labels = {
     managed_by  = "terraform"
@@ -191,7 +191,7 @@ resource "google_storage_bucket" "agent_exports" {
       type = "Delete"
     }
     condition {
-      age = 365  # Keep exports for 1 year
+      age = 365 # Keep exports for 1 year
     }
   }
 
